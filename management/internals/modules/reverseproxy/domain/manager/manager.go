@@ -270,48 +270,42 @@ func (m Manager) DeriveClusterFromDomain(ctx context.Context, accountID, domain 
 
 // extractClusterFromCustomDomains extracts the cluster address from a custom domain.
 // Supports both non-wildcard and wildcard custom domains.
-// If the request host matches multiple custom domains, the most specific match wins: exact non-wildcard
-// beats wildcard for the same apex (e.g. example.com beats *.example.com for host example.com).
+// An exact non-wildcard match always takes priority. Among other matches
+// (wildcard or subdomain of non-wildcard), the longest matching suffix wins.
 func extractClusterFromCustomDomains(host string, customDomains []*domain.Domain) (string, bool) {
 	normalizedHost := strings.ToLower(strings.TrimSuffix(host, "."))
 
+	// Exact non-wildcard match always wins — check first.
+	for _, cd := range customDomains {
+		normalizedCD := strings.ToLower(strings.TrimSuffix(cd.Domain, "."))
+		if !strings.HasPrefix(normalizedCD, "*.") && normalizedHost == normalizedCD {
+			return cd.TargetCluster, true
+		}
+	}
+
+	// Fall back to the longest wildcard or non-wildcard subdomain match.
 	var bestCluster string
-	bestScore := -1
+	bestLen := -1
 
 	for _, cd := range customDomains {
 		normalizedCD := strings.ToLower(strings.TrimSuffix(cd.Domain, "."))
 
-		// Wildcard custom domain (e.g. *.example.com): match host == suffix or host is subdomain of suffix
 		if strings.HasPrefix(normalizedCD, "*.") {
 			suffix := normalizedCD[2:]
-			if normalizedHost != suffix && !strings.HasSuffix(normalizedHost, "."+suffix) {
-				continue
+			if normalizedHost == suffix || strings.HasSuffix(normalizedHost, "."+suffix) {
+				if len(suffix) > bestLen {
+					bestCluster = cd.TargetCluster
+					bestLen = len(suffix)
+				}
 			}
-			score := len(suffix)
-			if normalizedHost == suffix {
-				score += 5000 // wildcard exact match
-			}
-			if score > bestScore {
+		} else if strings.HasSuffix(normalizedHost, "."+normalizedCD) {
+			if len(normalizedCD) > bestLen {
 				bestCluster = cd.TargetCluster
-				bestScore = score
+				bestLen = len(normalizedCD)
 			}
-			continue
-		}
-
-		// Non-wildcard: exact match or host is subdomain of custom domain
-		if normalizedHost != normalizedCD && !strings.HasSuffix(normalizedHost, "."+normalizedCD) {
-			continue
-		}
-		score := len(normalizedCD)
-		if normalizedHost == normalizedCD {
-			score += 10000 // exact match wins over wildcard
-		}
-		if score > bestScore {
-			bestCluster = cd.TargetCluster
-			bestScore = score
 		}
 	}
-	return bestCluster, bestScore >= 0
+	return bestCluster, bestLen >= 0
 }
 
 // ExtractClusterFromFreeDomain extracts the cluster address from a free domain.

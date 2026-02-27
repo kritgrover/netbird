@@ -13,6 +13,7 @@ import (
 	"github.com/netbirdio/netbird/management/server/permissions/modules"
 	"github.com/netbirdio/netbird/management/server/permissions/operations"
 	"github.com/netbirdio/netbird/management/server/types"
+	nbdomain "github.com/netbirdio/netbird/shared/management/domain"
 	"github.com/netbirdio/netbird/shared/management/status"
 )
 
@@ -104,6 +105,12 @@ func (m Manager) CreateDomain(ctx context.Context, accountID, userID, domainName
 	}
 	if !ok {
 		return nil, status.NewPermissionDeniedError()
+	}
+
+	// Validate the domain name (allows wildcard and non-wildcard)
+	domainName = strings.ToLower(strings.TrimSpace(domainName))
+	if !nbdomain.IsValidDomain(domainName) {
+		return nil, status.Errorf(status.InvalidArgument, "invalid domain name: %s", domainName)
 	}
 
 	// Verify the target cluster is in the available clusters
@@ -261,13 +268,50 @@ func (m Manager) DeriveClusterFromDomain(ctx context.Context, accountID, domain 
 	return "", fmt.Errorf("domain %s does not match any available proxy cluster", domain)
 }
 
-func extractClusterFromCustomDomains(domain string, customDomains []*domain.Domain) (string, bool) {
-	for _, customDomain := range customDomains {
-		if strings.HasSuffix(domain, "."+customDomain.Domain) {
-			return customDomain.TargetCluster, true
+// extractClusterFromCustomDomains extracts the cluster address from a custom domain.
+// Supports both non-wildcard and wildcard custom domains.
+// If the request host matches multiple custom domains, the most specific match wins: exact non-wildcard
+// beats wildcard for the same apex (e.g. example.com beats *.example.com for host example.com).
+func extractClusterFromCustomDomains(host string, customDomains []*domain.Domain) (string, bool) {
+	normalizedHost := strings.ToLower(strings.TrimSuffix(host, "."))
+
+	var bestCluster string
+	bestScore := -1
+
+	for _, cd := range customDomains {
+		normalizedCD := strings.ToLower(strings.TrimSuffix(cd.Domain, "."))
+
+		// Wildcard custom domain (e.g. *.example.com): match host == suffix or host is subdomain of suffix
+		if strings.HasPrefix(normalizedCD, "*.") {
+			suffix := normalizedCD[2:]
+			if normalizedHost != suffix && !strings.HasSuffix(normalizedHost, "."+suffix) {
+				continue
+			}
+			score := len(suffix)
+			if normalizedHost == suffix {
+				score += 5000 // wildcard exact match
+			}
+			if score > bestScore {
+				bestCluster = cd.TargetCluster
+				bestScore = score
+			}
+			continue
+		}
+
+		// Non-wildcard: exact match or host is subdomain of custom domain
+		if normalizedHost != normalizedCD && !strings.HasSuffix(normalizedHost, "."+normalizedCD) {
+			continue
+		}
+		score := len(normalizedCD)
+		if normalizedHost == normalizedCD {
+			score += 10000 // exact match wins over wildcard
+		}
+		if score > bestScore {
+			bestCluster = cd.TargetCluster
+			bestScore = score
 		}
 	}
-	return "", false
+	return bestCluster, bestScore >= 0
 }
 
 // ExtractClusterFromFreeDomain extracts the cluster address from a free domain.
